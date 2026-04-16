@@ -39,7 +39,9 @@ At personal scale (50-500 articles), a structured markdown index outperforms vec
 ```bash
 cd your-project
 git clone https://github.com/bmazeraski/claude_memory_system.git claude_memory_system
+rm -rf claude_memory_system/.git
 python claude_memory_system/setup.py
+git add claude_memory_system
 ```
 
 ### Option 2: Add as a git submodule
