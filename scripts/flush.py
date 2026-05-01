@@ -23,8 +23,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config import COMPILE_AFTER_HOUR, journal_path
-
 ROOT = Path(__file__).resolve().parent.parent
 JOURNAL_DIR = ROOT / "journal"
 SCRIPTS_DIR = ROOT / "scripts"
@@ -55,19 +53,29 @@ def save_flush_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
 
 
-def append_to_journal_log(content: str, section: str = "Session") -> None:
-    """Append content to today's journal log."""
-    today = datetime.now(timezone.utc).astimezone()
-    log_path = journal_path(today)
+def _journal_path(d: datetime) -> Path:
+    """Return the journal file path for a given datetime: journal/YYYY/MM/YYYY-MM-DD.md"""
+    return JOURNAL_DIR / f"{d.year}" / f"{d.month:02d}" / f"{d.strftime('%Y-%m-%d')}.md"
+
+
+def append_to_journal_log(
+    content: str,
+    section: str = "Session",
+    target_date: datetime | None = None,
+) -> None:
+    """Append content to a journal log. Defaults to today; pass target_date to
+    backfill a specific day (used by the orphan-transcript sweeper)."""
+    when = target_date or datetime.now(timezone.utc).astimezone()
+    log_path = _journal_path(when)
 
     if not log_path.exists():
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(
-            f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
+            f"# Daily Log: {when.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
             encoding="utf-8",
         )
 
-    time_str = today.strftime("%H:%M")
+    time_str = when.strftime("%H:%M")
     entry = f"### {section} ({time_str})\n\n{content}\n\n"
 
     with open(log_path, "a", encoding="utf-8") as f:
@@ -141,6 +149,9 @@ respond with exactly: FLUSH_OK
     return response
 
 
+COMPILE_AFTER_HOUR = 18  # 6 PM local time
+
+
 def maybe_trigger_compilation() -> None:
     """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
     import subprocess as _sp
@@ -159,7 +170,7 @@ def maybe_trigger_compilation() -> None:
             if today_log in ingested:
                 # Already compiled today - check if the log has changed since
                 from hashlib import sha256
-                log_path = journal_path(now)
+                log_path = _journal_path(now)
                 if log_path.exists():
                     current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
                     if ingested[today_log].get("hash") == current_hash:
@@ -190,13 +201,29 @@ def maybe_trigger_compilation() -> None:
 
 def main():
     if len(sys.argv) < 3:
-        logging.error("Usage: %s <context_file.md> <session_id>", sys.argv[0])
+        logging.error(
+            "Usage: %s <context_file.md> <session_id> [target_date YYYY-MM-DD]",
+            sys.argv[0],
+        )
         sys.exit(1)
 
     context_file = Path(sys.argv[1])
     session_id = sys.argv[2]
 
-    logging.info("flush.py started for session %s, context: %s", session_id, context_file)
+    target_date: datetime | None = None
+    if len(sys.argv) >= 4 and sys.argv[3]:
+        try:
+            naive = datetime.strptime(sys.argv[3], "%Y-%m-%d")
+            target_date = naive.replace(tzinfo=datetime.now(timezone.utc).astimezone().tzinfo)
+        except ValueError:
+            logging.warning("Ignoring invalid target_date: %s", sys.argv[3])
+
+    logging.info(
+        "flush.py started for session %s, context: %s%s",
+        session_id,
+        context_file,
+        f", target_date={target_date.date()}" if target_date else "",
+    )
 
     if not context_file.exists():
         logging.error("Context file not found: %s", context_file)
@@ -224,18 +251,21 @@ def main():
     # Run the LLM extraction
     response = asyncio.run(run_flush(context))
 
-    # Append to daily log
+    # Append to daily log (target_date set when recovering an orphan transcript)
     if "FLUSH_OK" in response:
         logging.info("Result: FLUSH_OK")
         append_to_journal_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
+            "FLUSH_OK - Nothing worth saving from this session",
+            "Memory Flush",
+            target_date,
         )
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
-        append_to_journal_log(response, "Memory Flush")
+        append_to_journal_log(response, "Memory Flush", target_date)
     else:
         logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_journal_log(response, "Session")
+        section = "Session (recovered)" if target_date else "Session"
+        append_to_journal_log(response, section, target_date)
 
     # Update dedup state
     save_flush_state({"session_id": session_id, "timestamp": time.time()})

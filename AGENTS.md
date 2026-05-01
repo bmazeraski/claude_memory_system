@@ -334,7 +334,8 @@ Hooks are configured in `.claude/settings.json` and fire automatically when you 
   "hooks": {
     "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run --project claude_memory_system python claude_memory_system/hooks/session-start.py", "timeout": 15 }] }],
     "PreCompact": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run --project claude_memory_system python claude_memory_system/hooks/pre-compact.py", "timeout": 10 }] }],
-    "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run --project claude_memory_system python claude_memory_system/hooks/session-end.py", "timeout": 10 }] }]
+    "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run --project claude_memory_system python claude_memory_system/hooks/session-end.py", "timeout": 10 }] }],
+    "Stop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run --project claude_memory_system python claude_memory_system/hooks/stop.py", "timeout": 10 }] }]
   }
 }
 ```
@@ -362,7 +363,17 @@ Commands use `--project claude_memory_system` so `uv` finds the `pyproject.toml`
 - Guards against empty `transcript_path` (known Claude Code bug #13668)
 - Critical for long sessions: captures context before summarization discards it
 
-**Why both PreCompact and SessionEnd?** Long-running sessions may trigger multiple auto-compactions before you close the session. Without PreCompact, intermediate context is lost to summarization before SessionEnd ever fires.
+**`stop.py`** (Stop)
+- Orphan-transcript sweeper - the safety net for sessions that died ungracefully
+- Fires after every assistant turn, but does *no* API calls itself
+- Scans the project's JSONL transcript directory (parent of the current `transcript_path`)
+- For each `*.jsonl` that is **not** the current session, was last modified more than 30 minutes ago, and has new content since the last sweep, spawns `flush.py` with `--target-date` set to the transcript's mtime so the journal entry lands on the correct day
+- State tracked in `scripts/swept-state.json` (map of `session_id -> {mtime, swept_at, source}`)
+- `session-end.py` and `pre-compact.py` also write to `swept-state.json` after spawning flush, so this hook never re-flushes what they already handled
+
+**Why all three (PreCompact + SessionEnd + Stop)?** Long-running sessions may trigger multiple auto-compactions before you close the session - without PreCompact, intermediate context is lost. SessionEnd captures the final state on graceful shutdown. Stop catches sessions that ended **un**gracefully (closed terminal, killed process, host reboot) - the SessionEnd hook never fires for those, so without Stop their content would be lost.
+
+**One-time bootstrap:** On first activation in a project, populate `swept-state.json` with all existing `*.jsonl` transcript IDs and their current mtimes - otherwise the hook treats every old transcript as an orphan on first run and re-flushes the lot.
 
 ### Background Flush Process (`flush.py`)
 
