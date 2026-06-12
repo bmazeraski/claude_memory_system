@@ -35,6 +35,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project claude_memory_system python claude_memory_system/hooks/stop.py",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
